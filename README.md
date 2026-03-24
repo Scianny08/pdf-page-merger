@@ -106,6 +106,8 @@ Trascina i tuoi file PDF nell'area di rilascio o usa il tasto
 -   Regola gli slider per ogni file per decidere quali pagine
     affiancare\
     (es. escludi la copertina impostando l'inizio a pagina 2).
+-   Clicca su ... per escludere pagine indesiderate dal merging inserendo singole pagine o intervalli\
+    (es. 1, 3-5, 10)
 
 **Esecuzione:**\
 Clicca su **MERGE PDF**.
