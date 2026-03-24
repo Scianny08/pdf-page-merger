@@ -1,6 +1,6 @@
-# PDF Fusion Pro
+# PDF Fusion
 
-PDF Fusion Pro è un'utilità desktop moderna per manipolare l'ordine delle pagine nei documenti PDF. È ideale per correggere scansioni o preparare documenti in stile Orientale/Manga.
+PDF Fusion è un software per manipolare l'ordine delle pagine nei documenti PDF. È ideale per correggere scansioni o preparare documenti in stile Orientale/Manga.
 
 ## Requisiti
 
