@@ -13,26 +13,29 @@ class PDFItem(ctk.CTkFrame):
         is_single = self.max_pagine <= 1
         slider_to, steps = (1.1, 1) if is_single else (self.max_pagine, self.max_pagine - 1)
 
-        # Header
+        # Header compatto
         self.header = ctk.CTkFrame(self, fg_color="transparent")
         self.header.pack(fill="x", padx=10, pady=(5, 0))
-        ctk.CTkLabel(self.header, text=os.path.basename(file_path), font=("Roboto", 13, "bold"), text_color="#2ecc71").pack(side="left")
-        ctk.CTkButton(self.header, text="X", width=30, height=25, fg_color="#C0392B", command=lambda: on_remove(self)).pack(side="right", padx=2)
-        ctk.CTkButton(self.header, text="▼", width=30, height=25, fg_color="#34495E", command=lambda: on_move_down(self)).pack(side="right", padx=2)
-        ctk.CTkButton(self.header, text="▲", width=30, height=25, fg_color="#34495E", command=lambda: on_move_up(self)).pack(side="right", padx=2)
+        
+        ctk.CTkLabel(self.header, text=os.path.basename(file_path), 
+                     font=("Roboto", 12, "bold"), text_color="#2ecc71").pack(side="left")
+        
+        # Bottoni
+        ctk.CTkButton(self.header, text="X", width=25, height=20, fg_color="#C0392B", command=lambda: on_remove(self)).pack(side="right", padx=2)
+        ctk.CTkButton(self.header, text="▼", width=25, height=20, fg_color="#34495E", command=lambda: on_move_down(self)).pack(side="right", padx=2)
+        ctk.CTkButton(self.header, text="▲", width=25, height=20, fg_color="#34495E", command=lambda: on_move_up(self)).pack(side="right", padx=2)
 
-        ctk.CTkLabel(self, text=f"Pagine: {self.max_pagine}", font=("Roboto", 10, "italic"), text_color="gray").pack(padx=10, anchor="w")
-
-        # Slider Inizio/Fine
-        self.label_s = ctk.CTkLabel(self, text="Inizio: 1")
+        # Slider Inizio
+        self.label_s = ctk.CTkLabel(self, text="Inizio: 1", font=("Roboto", 10))
         self.label_s.pack(padx=20, anchor="w")
-        self.slider_s = ctk.CTkSlider(self, from_=1, to=slider_to, number_of_steps=steps, command=self.update_labels)
+        self.slider_s = ctk.CTkSlider(self, from_=1, to=slider_to, number_of_steps=steps, height=16, command=self.update_labels)
         self.slider_s.set(1); self.slider_s.pack(fill="x", padx=20)
 
-        self.label_e = ctk.CTkLabel(self, text=f"Fine: {self.max_pagine}")
+        # Slider Fine
+        self.label_e = ctk.CTkLabel(self, text=f"Fine: {self.max_pagine}", font=("Roboto", 10))
         self.label_e.pack(padx=20, anchor="w")
-        self.slider_e = ctk.CTkSlider(self, from_=1, to=slider_to, number_of_steps=steps, command=self.update_labels)
-        self.slider_e.set(self.max_pagine); self.slider_e.pack(fill="x", padx=20, pady=(0, 15))
+        self.slider_e = ctk.CTkSlider(self, from_=1, to=slider_to, number_of_steps=steps, height=16, command=self.update_labels)
+        self.slider_e.set(self.max_pagine); self.slider_e.pack(fill="x", padx=20, pady=(0, 10))
 
         if is_single:
             self.slider_s.configure(state="disabled"); self.slider_e.configure(state="disabled")
@@ -46,13 +49,17 @@ class PDFItem(ctk.CTkFrame):
     def get_data(self):
         return {"path": self.file_path, "start": int(min(self.slider_s.get(), self.max_pagine)) - 1, "end": int(min(self.slider_e.get(), self.max_pagine))}
 
-class PDFMangaGUI(ctk.CTk, TkinterDnD.DnDWrapper):
+class PDFPageMergerGUI(ctk.CTk, TkinterDnD.DnDWrapper):
     def __init__(self):
         super().__init__()
         self._inizializza_tkdnd()
-        self.title("PDF Page Merger"); self.geometry("600x650")
+        self.title("PDF Page Merger")
+        self.geometry("600x650")
         self.items = []
         self.crea_widget()
+        
+        # Abilita lo scroll con la rotella su tutta la finestra
+        self._bind_mouse_wheel(self)
 
     def _inizializza_tkdnd(self):
         try:
@@ -61,21 +68,54 @@ class PDFMangaGUI(ctk.CTk, TkinterDnD.DnDWrapper):
             self.tk.call('lappend', 'auto_path', path); self.tk.call('package', 'require', 'tkdnd')
         except: pass
 
-    def crea_widget(self):
-        ctk.CTkLabel(self, text="📚 PDF Page Merger", font=("Roboto", 24, "bold")).pack(pady=20)
-        self.style_var = ctk.StringVar(value="Orientale")
-        ctk.CTkSegmentedButton(self, values=["Orientale", "Occidentale"], variable=self.style_var).pack(pady=10)
+    def _bind_mouse_wheel(self, widget):
+        """Associa lo scroll della rotella evitando i widget che non lo supportano."""
+        try:
+            # Proviamo a bindare gli eventi
+            widget.bind("<MouseWheel>", self._on_mouse_wheel) # Windows/macOS
+            widget.bind("<Button-4>", self._on_mouse_wheel)   # Linux scroll up
+            widget.bind("<Button-5>", self._on_mouse_wheel)   # Linux scroll down
+        except (NotImplementedError, Exception):
+            # Se il widget (come CTkSegmentedButton) non lo permette, ignoriamo e passiamo oltre
+            pass
+        
+        # Continua ricorsivamente per tutti i figli del widget
+        try:
+            for child in widget.winfo_children():
+                self._bind_mouse_wheel(child)
+        except Exception:
+            pass
 
-        self.drop_frame = ctk.CTkFrame(self, height=100, border_width=2, border_color="#3b8ed0")
-        self.drop_frame.pack(pady=10, padx=30, fill="x"); self.drop_frame.pack_propagate(False)
+    def _on_mouse_wheel(self, event):
+        """Gestisce l'evento di scroll della rotella."""
+        # Se la scroll_frame non è visibile, non fare nulla
+        if not self.items: return
+        
+        # Windows/macOS: event.delta
+        # Linux: event.num (4 o 5)
+        if event.num == 4 or event.delta > 0:
+            self.scroll_frame._parent_canvas.yview_scroll(-1, "units")
+        elif event.num == 5 or event.delta < 0:
+            self.scroll_frame._parent_canvas.yview_scroll(1, "units")
+
+    def crea_widget(self):
+        ctk.CTkLabel(self, text="📚 PDF Page Merger", font=("Roboto", 22, "bold")).pack(pady=15)
+        self.style_var = ctk.StringVar(value="Orientale")
+        ctk.CTkSegmentedButton(self, values=["Orientale", "Occidentale"], variable=self.style_var).pack(pady=5)
+
+        self.drop_frame = ctk.CTkFrame(self, height=80, border_width=2, border_color="#3b8ed0")
+        self.drop_frame.pack(pady=10, padx=20, fill="x"); self.drop_frame.pack_propagate(False)
         ctk.CTkLabel(self.drop_frame, text="Trascina qui i PDF").pack(expand=True)
         self.drop_frame.drop_target_register(DND_FILES); self.drop_frame.dnd_bind('<<Drop>>', self.gestisci_drop)
 
-        ctk.CTkButton(self, text="📁 Seleziona File", command=self.seleziona_file, fg_color="#1b5e20").pack(pady=10)
+        ctk.CTkButton(self, text="📁 Seleziona File", command=self.seleziona_file, fg_color="#1b5e20", height=32).pack(pady=5)
+        
+        # Frame scorrevole
         self.scroll_frame = ctk.CTkScrollableFrame(self, label_text="Lista Documenti")
+        
         self.progress_bar = ctk.CTkProgressBar(self)
-        self.btn_avvia = ctk.CTkButton(self, text="MERGE PDF", command=self.esegui, state="disabled", font=("Roboto", 14, "bold"))
-        self.btn_avvia.pack(pady=20, side="bottom")
+        self.btn_avvia = ctk.CTkButton(self, text="MERGE PDF", command=self.esegui, state="disabled", font=("Roboto", 14, "bold"), height=40)
+        self.btn_avvia.pack(pady=15, side="bottom")
 
     def seleziona_file(self):
         paths = ctk.filedialog.askopenfilenames(filetypes=[("PDF Files", "*.pdf")])
@@ -88,32 +128,47 @@ class PDFMangaGUI(ctk.CTk, TkinterDnD.DnDWrapper):
             if p.lower().endswith('.pdf'): self.aggiungi_pdf(p)
 
     def aggiungi_pdf(self, path):
-        if not self.items: self.scroll_frame.pack(pady=10, padx=30, fill="both", expand=True, before=self.btn_avvia)
+        if not self.items: 
+            self.scroll_frame.pack(pady=5, padx=20, fill="both", expand=True, before=self.btn_avvia)
+        
         item = PDFItem(self.scroll_frame, path, self.rimuovi_pdf, self.muovi_su, self.muovi_giu)
-        item.pack(fill="x", pady=8, padx=5); self.items.append(item)
+        item.pack(fill="x", pady=5, padx=5)
+        self.items.append(item)
+        
+        # Aggiorna il binding per i nuovi widget creati
+        self._bind_mouse_wheel(item)
         self.btn_avvia.configure(state="normal")
 
     def rimuovi_pdf(self, item):
         item.destroy(); self.items.remove(item)
-        if not self.items: self.scroll_frame.pack_forget(); self.btn_avvia.configure(state="disabled")
+        if not self.items: 
+            self.scroll_frame.pack_forget(); self.btn_avvia.configure(state="disabled")
 
     def muovi_su(self, item):
         idx = self.items.index(item)
-        if idx > 0: self.items[idx], self.items[idx-1] = self.items[idx-1], self.items[idx]; self.refresh_list()
+        if idx > 0: 
+            self.items[idx], self.items[idx-1] = self.items[idx-1], self.items[idx]
+            self.refresh_list()
 
     def muovi_giu(self, item):
         idx = self.items.index(item)
-        if idx < len(self.items) - 1: self.items[idx], self.items[idx+1] = self.items[idx+1], self.items[idx]; self.refresh_list()
+        if idx < len(self.items) - 1: 
+            self.items[idx], self.items[idx+1] = self.items[idx+1], self.items[idx]
+            self.refresh_list()
 
     def refresh_list(self):
-        for item in self.items: item.pack_forget(); item.pack(fill="x", pady=8, padx=5)
+        for item in self.items: 
+            item.pack_forget(); item.pack(fill="x", pady=5, padx=5)
 
     def esegui(self):
         self.progress_bar.pack(pady=10, fill="x", padx=60, before=self.btn_avvia)
         self.btn_avvia.configure(state="disabled"); self.update()
         tasks = [item.get_data() for item in self.items]
         try:
-            out = elabora_documento(tasks, self.style_var.get() == "Orientale", self.progress_bar.set)
-            CTkMessagebox(title="Successo", message=f"Creato in Documenti/pdf-page-merger:\n{out.name}", icon="check")
-        except Exception as e: CTkMessagebox(title="Errore", message=str(e), icon="cancel")
-        finally: self.progress_bar.pack_forget(); self.btn_avvia.configure(state="normal")
+            # logic.py ora gestisce i file multipli separatamente
+            elabora_documento(tasks, self.style_var.get() == "Orientale", self.progress_bar.set)
+            CTkMessagebox(title="Successo", message=f"Operazione completata!\nI file sono nella cartella Documenti/pdf-page-merger", icon="check")
+        except Exception as e: 
+            CTkMessagebox(title="Errore", message=str(e), icon="cancel")
+        finally: 
+            self.progress_bar.pack_forget(); self.btn_avvia.configure(state="normal")

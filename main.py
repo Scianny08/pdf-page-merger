@@ -1,11 +1,13 @@
-from gui import PDFMangaGUI
+import traceback
+from gui import PDFPageMergerGUI  # <--- Nome aggiornato e importato
 
 def main():
     try:
-        app = PDFMangaGUI()
+        app = PDFPageMergerGUI()
         app.mainloop()
-    except Exception as e:
-        print(f"Errore critico: {e}")
+    except Exception:
+        traceback.print_exc()
+        input("\nPremi INVIO per chiudere...")
 
 if __name__ == "__main__":
     main()
