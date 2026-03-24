@@ -50,7 +50,7 @@ class PDFMangaGUI(ctk.CTk, TkinterDnD.DnDWrapper):
     def __init__(self):
         super().__init__()
         self._inizializza_tkdnd()
-        self.title("PDF Page Merger"); self.geometry("750x850")
+        self.title("PDF Page Merger"); self.geometry("600x650")
         self.items = []
         self.crea_widget()
 
