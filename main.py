@@ -1,6 +1,6 @@
 import traceback
-from gui import PDFPageMergerGUI  # <--- Nome aggiornato e importato
-
+from gui import PDFPageMergerGUI
+ 
 def main():
     try:
         app = PDFPageMergerGUI()

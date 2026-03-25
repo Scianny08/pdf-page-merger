@@ -1,123 +1,104 @@
 # 📚 PDF Page Merger
 
-**PDF Page Merger** è un'applicazione desktop moderna e intuitiva
-sviluppata in Python.\
-È stata progettata specificamente per appassionati di fumetti e manga
-che desiderano ottimizzare la propria esperienza di lettura su tablet o
-schermi grandi, permettendo di unire pagine singole in tavole affiancate
-senza alcuna perdita di dati.
+**PDF Page Merger** è un'applicazione desktop sviluppata in Python per appassionati di fumetti e manga.
+Permette di unire pagine singole in tavole affiancate senza alcuna perdita di contenuto,
+ottimizzando la lettura su tablet e schermi larghi.
 
-------------------------------------------------------------------------
+---
 
-## ✨ Caratteristiche Principali
+## ✨ Funzionalità
 
-### Dual Mode (Lettura Dinamica)
+**Dual Mode**
+Scegli la direzione di lettura prima di avviare il merge:
+- **Orientale** — Destra → Sinistra, ideale per manga
+- **Occidentale** — Sinistra → Destra, per comic e documenti
 
--   **Orientale:** Affiancamento Destra → Sinistra (ideale per Manga).
--   **Occidentale:** Affiancamento Sinistra → Destra (Comic classici,
-    libri, documenti).
+**Gestione Multi-File**
+Carica più PDF contemporaneamente e riordinali con i tasti ▲/▼ prima dell'elaborazione.
 
-### Gestione Avanzata Multi-File
+**Selective Merging**
+Per ogni file puoi definire tramite slider l'intervallo esatto di pagine da affiancare.
+Le pagine fuori range (es. copertine, crediti) e le pagine dispari rimangono singole: nessun contenuto viene perso.
 
-Carica più PDF contemporaneamente e decidi l'ordine di fusione tramite i
-tasti di riordinamento (▲/▼).
+**Esclusione Pagine**
+Il tasto `...` su ogni file apre un dialogo per escludere pagine specifiche o intervalli dal merging (es. `1, 3-5, 10`). Il tasto diventa arancione quando sono presenti esclusioni attive.
 
-### Selective Merging
+**Info File**
+Accanto al nome di ogni PDF viene mostrato il numero totale di pagine del documento.
 
-Grazie agli slider grafici, puoi definire un intervallo preciso di
-pagine da affiancare.
+**Drag & Drop**
+Trascina i file PDF direttamente nella finestra. Supportato su Windows, macOS e Linux.
 
-### Zero Data Loss
+**Organizzazione Automatica**
+I file elaborati vengono salvati in `Documenti/pdf-page-merger/` con il suffisso `- ORIENTALE` o `- OCCIDENTALE`.
 
-Le pagine al di fuori del range selezionato o le pagine "solitarie"
-(dispari) vengono mantenute come pagine singole. Nessun contenuto viene
-eliminato.
+---
 
-### Organizzazione Automatica
+## 🖥️ Compatibilità
 
-I file elaborati vengono salvati automaticamente nella cartella:
+| Sistema Operativo | Architetture supportate |
+|---|---|
+| Windows | x86, x64 |
+| macOS | Intel (x86_64), Apple Silicon (arm64) |
+| Linux | x86, x86_64, ARM64 |
 
-`Documenti/pdf-page-merger`
-
-mantenendo il sistema pulito e ordinato.
-
-### Interfaccia Moderna
-
-UI basata su **CustomTkinter** con supporto nativo al Drag & Drop.
-
-------------------------------------------------------------------------
+---
 
 ## 🚀 Installazione
 
-### 1. Prerequisiti
+### Prerequisiti
 
-Assicurati di avere **Python 3.10** o superiore installato sul tuo
-sistema.
+- **Python 3.10** o superiore
 
-### 2. Setup Ambiente Virtuale
+### 1. Crea un ambiente virtuale
 
-È consigliato isolare le dipendenze per evitare conflitti:
-
-``` powershell
-# Creazione ambiente
+```bash
 python -m venv .venv
+```
 
-# Attivazione (Windows)
+### 2. Attivalo
+
+```bash
+# Windows
 .\.venv\Scripts\activate
 
-# Attivazione (Linux/macOS)
+# macOS / Linux
 source .venv/bin/activate
 ```
 
-### 3. Installazione Dipendenze
+### 3. Installa le dipendenze
 
-Installa le librerie necessarie tramite il file `requirements.txt`:
-
-``` powershell
+```bash
 pip install -r requirements.txt
 ```
 
-**Contenuto di requirements.txt:**
+**Dipendenze (`requirements.txt`):**
 
--   `customtkinter` --- Interfaccia grafica
--   `pymupdf` --- Motore di elaborazione PDF
--   `tkinterdnd2` --- Supporto Drag & Drop
--   `ctkmessagebox` --- Pop-up di sistema
+| Libreria | Descrizione |
+|---|---|
+| `customtkinter` | Interfaccia grafica moderna |
+| `pymupdf` | Motore di elaborazione PDF |
+| `tkinterdnd2` | Supporto Drag & Drop nativo |
+| `ctkmessagebox` | Finestre di dialogo |
 
-------------------------------------------------------------------------
+---
 
-## 🛠️ Guida all'uso
+## 🛠️ Utilizzo
 
-**Avvio:**\
-Esegui:
+### Avvio
 
-``` bash
+```bash
 python main.py
 ```
 
-**Caricamento:**\
-Trascina i tuoi file PDF nell'area di rilascio o usa il tasto
-**"Seleziona File"**.
+### Flusso di lavoro
 
-**Configurazione:**
+1. **Carica** i PDF trascinandoli nell'area di rilascio oppure tramite il tasto **"Seleziona File"**
+2. **Riordina** i file con ▲/▼ se necessario
+3. **Configura** ogni file:
+   - Usa gli **slider** per definire l'intervallo di pagine da affiancare
+   - Usa **`...`** per escludere pagine specifiche o intervalli (es. `1, 3-5, 10`)
+4. **Scegli** la modalità **Orientale** o **Occidentale**
+5. **Avvia** con il tasto **MERGE PDF**
 
--   Scegli lo stile (**Orientale** o **Occidentale**).
--   Usa le frecce ▲/▼ per ordinare i capitoli/file.
--   Regola gli slider per ogni file per decidere quali pagine
-    affiancare\
-    (es. escludi la copertina impostando l'inizio a pagina 2).
--   Clicca su ... per escludere pagine indesiderate dal merging inserendo singole pagine o intervalli\
-    (es. 1, 3-5, 10)
-
-**Esecuzione:**\
-Clicca su **MERGE PDF**.
-
-**Risultato:**\
-Troverai il file finale nella tua cartella utente sotto:
-
-`Documenti/pdf-page-merger`
-
-con il suffisso:
-
--   `- ORIENTALE`
--   `- OCCIDENTALE`
+I file risultanti si trovano in `Documenti/pdf-page-merger/`.
