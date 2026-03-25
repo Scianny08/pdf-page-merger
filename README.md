@@ -1,6 +1,6 @@
 # 📚 PDF Page Merger
 
-**PDF Page Merger** è un'applicazione desktop sviluppata in Python per appassionati di fumetti e manga.
+**PDF Page Merger** è un'applicazione desktop sviluppata in Python con vibe coding per appassionati di fumetti e manga.
 Permette di unire pagine singole in tavole affiancate senza alcuna perdita di contenuto,
 ottimizzando la lettura su tablet e schermi larghi.
 
