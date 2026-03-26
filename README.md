@@ -74,7 +74,7 @@ The `Switch to Light / Switch to Dark` button in the top-right corner toggles th
 ### 1. Clone or download the project
 
 ```bash
-git clone https://github.com/your-username/pdf-page-merger.git
+git clone https://github.com/Scianny08/pdf-page-merger.git
 cd pdf-page-merger
 ```
 
