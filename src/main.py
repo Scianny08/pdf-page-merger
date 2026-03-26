@@ -3,7 +3,7 @@ main.py — Application entry point for PDF Page Merger.
 """
 
 import traceback
-from gui import PDFPageMergerGUI
+from src.gui import PDFPageMergerGUI
 
 
 def main() -> None:
