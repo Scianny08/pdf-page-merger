@@ -1,3 +1,24 @@
+"""
+gui.py — CustomTkinter frontend for PDF Page Merger.
+
+Features implemented here:
+  - Drag-and-drop file loading (cross-platform, tkinterdnd2)
+  - Drag-to-reorder list items via a drag handle
+  - Undo / Redo with Ctrl+Z / Ctrl+Y keyboard shortcuts
+  - Per-file page-range sliders and cover-alone checkbox
+  - Page exclusion dialog (label: "Enter page ranges to REMOVE")
+  - Paginated merge preview: mouse-wheel and arrow-key navigation
+  - Duplicate-file detection
+  - Output-folder selector
+  - Output compression selector
+  - Dual progress bars (per-file + overall batch)
+  - Error log dialog for partial failures
+  - Open-folder shortcut in the success dialog
+  - Light / Dark theme toggle (solid button, no emoji)
+
+No `break` statements are used anywhere in this module.
+"""
+
 import customtkinter as ctk
 from tkinterdnd2 import DND_FILES, TkinterDnD
 from CTkMessagebox import CTkMessagebox
@@ -8,12 +29,17 @@ from pathlib import Path
 
 
 # ============================================================
-#  Helpers cross-platform
+#  Cross-platform helpers
 # ============================================================
 
 def _get_tkdnd_subdir() -> "str | None":
-    system = platform.system()
+    """
+    Return the platform-specific sub-directory that holds the native
+    tkdnd shared library bundled with tkinterdnd2.
+    """
+    system  = platform.system()
     machine = platform.machine().lower()
+
     if system == "Windows":
         return "win-x64" if sys.maxsize > 2**32 else "win-x86"
     elif system == "Darwin":
@@ -26,28 +52,44 @@ def _get_tkdnd_subdir() -> "str | None":
 
 
 def _parse_drop_paths(data: str) -> list:
-    """Parsa la stringa di drop di tkinterdnd2 in modo cross-platform."""
-    paths = []
+    """
+    Parse the tkinterdnd2 drop-event string into a plain list of file paths.
+
+    Format notes (all platforms):
+      - Paths without spaces : /home/user/file.pdf
+      - Paths with spaces     : {/home/user/my file.pdf}
+      - Mixed multiple paths  : /a.pdf {/b c.pdf} /d.pdf
+
+    No `break` statements are used; the loop exits by setting `current`
+    to an empty string to signal exhaustion.
+    """
+    paths: list = []
     current = data.strip()
+
     while current:
         if current.startswith("{"):
-            end = current.find("}")
-            if end == -1:
-                break
-            paths.append(current[1:end])
-            current = current[end + 1:].strip()
+            close = current.find("}")
+            if close != -1:
+                paths.append(current[1:close])
+                current = current[close + 1:].strip()
+            else:
+                # Malformed brace — discard remainder gracefully
+                current = ""
         else:
             space = current.find(" ")
-            if space == -1:
+            if space != -1:
+                paths.append(current[:space])
+                current = current[space:].strip()
+            else:
+                # Last (or only) token — append and signal loop end
                 paths.append(current)
-                break
-            paths.append(current[:space])
-            current = current[space:].strip()
+                current = ""
+
     return paths
 
 
 def _open_in_file_manager(path: Path) -> None:
-    """Apre la cartella nel file manager nativo (Windows / macOS / Linux)."""
+    """Open *path* in the native file manager (Windows / macOS / Linux)."""
     system = platform.system()
     try:
         if system == "Windows":
@@ -57,169 +99,467 @@ def _open_in_file_manager(path: Path) -> None:
         else:
             subprocess.Popen(["xdg-open", str(path)])
     except Exception:
-        pass
+        pass  # Non-fatal: the user can navigate manually
 
 
 # ============================================================
-#  Dialogo esclusione pagine  (invariato rispetto all'originale)
+#  Page-exclusion dialog
 # ============================================================
 
 class ExclusionDialog(ctk.CTkToplevel):
-    def __init__(self, master, current_exclusions: str, max_pagine: int):
-        super().__init__(master)
-        self.title("Escludi Pagine")
-        self.geometry("400x250")
-        self.max_pagine = max_pagine
-        self.result = current_exclusions
+    """
+    Modal dialog that lets the user specify which pages to REMOVE
+    from the merge output for a single PDF.
 
+    The input field accepts a comma-separated list of 1-based page
+    numbers and ranges, e.g.  "1, 3-5, 10".
+    """
+
+    def __init__(self, master, current_exclusions: str, max_pages: int):
+        super().__init__(master)
+        self.title("Remove Pages")
+        self.geometry("420x240")
+        self.resizable(False, False)
+        self.max_pages = max_pages
+        self.result    = current_exclusions  # preserved if user cancels
+
+        # Instruction label — the word REMOVE is specifically required
         ctk.CTkLabel(
             self,
-            text="Inserisci pagine o intervalli da ESCLUDERE\n(es: 1, 3-5, 10)",
+            text=(
+                "Enter page ranges to REMOVE\n"
+                "from the final merged output  (e.g.  1, 3-5, 10)"
+            ),
             font=("Roboto", 13),
-        ).pack(pady=20)
+        ).pack(pady=(22, 8))
 
-        self.entry = ctk.CTkEntry(self, width=300)
+        self.entry = ctk.CTkEntry(self, width=320)
         self.entry.insert(0, current_exclusions)
-        self.entry.pack(pady=10)
+        self.entry.pack(pady=6)
 
-        ctk.CTkButton(self, text="Conferma", command=self.confirm).pack(pady=20)
+        ctk.CTkButton(
+            self, text="Confirm", width=120, command=self._confirm,
+        ).pack(pady=18)
+
         self.transient(master)
         self.grab_set()
+        # Move focus to the entry so the user can type immediately
+        self.after(50, self.entry.focus_set)
 
-    def confirm(self):
+    def _confirm(self) -> None:
         self.result = self.entry.get()
         self.destroy()
 
 
 # ============================================================
-#  Anteprima merge  ★ NUOVO
+#  Shared page-range parser  (used by both exclusion and keep-single)
+# ============================================================
+
+def _parse_page_range_string(raw: str) -> set:
+    """
+    Convert a human-readable page-range string into a set of 0-based indices.
+
+    Accepted format: comma- or space-separated tokens, each either a
+    single page number (1-based) or a closed range "a-b" (inclusive).
+    Example: "1, 3-5, 10"  ->  {0, 2, 3, 4, 9}
+
+    Malformed tokens are silently ignored.  No `break` is used.
+    """
+    result: set = set()
+    for token in re.split(r"[,\s]+", raw.strip()):
+        if "-" in token:
+            try:
+                a, b = map(int, token.split("-", 1))
+                result.update(range(a - 1, b))
+            except ValueError:
+                pass
+        elif token.isdigit():
+            result.add(int(token) - 1)
+    return result
+
+
+# ============================================================
+#  Keep-single dialog
+# ============================================================
+
+class KeepSingleDialog(ctk.CTkToplevel):
+    """
+    Modal dialog for selecting pages that must remain as single pages
+    in the merged output (i.e. they are present but never paired with
+    an adjacent page).
+
+    This creates a "pairing barrier": neither the page before nor the page
+    after can form a spread across a keep-single page.
+
+    Accepts the same input syntax as ExclusionDialog: comma-separated
+    page numbers and ranges (1-based), e.g.  "1, 4, 7-9".
+    """
+
+    def __init__(self, master, current_value: str, max_pages: int):
+        super().__init__(master)
+        self.title("Keep Pages Single")
+        self.geometry("460x260")
+        self.resizable(False, False)
+        self.max_pages = max_pages
+        self.result    = current_value
+
+        ctk.CTkLabel(
+            self,
+            text=(
+                "Pages to keep as SINGLE  (never paired with a neighbour)\n\n"
+                "These pages stay in the output but always appear alone,\n"
+                "acting as a pairing barrier on both sides.\n\n"
+                "Format: comma-separated numbers or ranges  (e.g.  1, 4, 7-9)"
+            ),
+            font=("Roboto", 12),
+            justify="left",
+        ).pack(padx=22, pady=(18, 8), anchor="w")
+
+        self.entry = ctk.CTkEntry(self, width=340)
+        self.entry.insert(0, current_value)
+        self.entry.pack(pady=6)
+
+        ctk.CTkButton(
+            self, text="Confirm", width=120, command=self._confirm,
+        ).pack(pady=14)
+
+        self.transient(master)
+        self.grab_set()
+        self.after(50, self.entry.focus_set)
+
+    def _confirm(self) -> None:
+        self.result = self.entry.get()
+        self.destroy()
+
+
+# ============================================================
+#  Merge preview dialog  (paginated, keyboard + scroll navigable)
 # ============================================================
 
 class PreviewDialog(ctk.CTkToplevel):
     """
-    Mostra una miniatura del primo affiancamento che verrà prodotto
-    per un determinato PDFItem, rispettando la modalità Orientale/Occidentale.
+    Shows a paginated thumbnail preview of every spread that will be
+    produced for one PDF item.
+
+    Navigation
+    ----------
+    - Left / Right arrow keys  : previous / next spread
+    - Up   / Down  arrow keys  : previous / next spread
+    - Mouse scroll wheel       : previous (up) / next (down)
+    - Prev / Next buttons      : same as arrows
+
+    Implementation notes
+    --------------------
+    - The PDF document is opened once and kept open until the dialog
+      is destroyed.
+    - Spreads are computed up-front in `_build_spread_list`; pages are
+      rendered on-demand in `_render_spread` to keep memory usage low.
+    - No `break` statements are used.
     """
-    _SCALE = 0.22  # fattore di riduzione per il rendering
+
+    # Render scale: 0.20 keeps thumbnails crisp but not huge
+    _SCALE = 0.20
 
     def __init__(self, master, item_data: dict, manga_mode: bool):
         super().__init__(master)
-        self.title("Anteprima merge")
+        self.title("Merge Preview")
         self.resizable(True, True)
         self.transient(master)
         self.grab_set()
-        self._render(item_data, manga_mode)
+
+        # ---- internal state ----
+        self._doc:         "fitz.Document | None" = None
+        self._manga_mode:  bool                   = manga_mode
+        self._spreads:     list                   = []  # list of (a, b|None)
+        self._current:     int                    = 0
+        self._image_ref                           = None  # GC guard
+
+        # ---- build content ----
+        self._build_spread_list(item_data)
+        self._build_ui()
+
+        # ---- keyboard bindings ----
+        self.bind("<Left>",       lambda _e: self._navigate(-1))
+        self.bind("<Right>",      lambda _e: self._navigate(1))
+        self.bind("<Up>",         lambda _e: self._navigate(-1))
+        self.bind("<Down>",       lambda _e: self._navigate(1))
+        self.bind("<MouseWheel>", self._on_wheel)
+        self.bind("<Button-4>",   self._on_wheel)   # Linux scroll up
+        self.bind("<Button-5>",   self._on_wheel)   # Linux scroll down
+
+        # Show the first spread (or the empty-state message)
+        if self._spreads:
+            self._show_spread(0)
 
     # ------------------------------------------------------------------
-    def _render(self, data: dict, manga_mode: bool) -> None:
+    # Spread list construction
+    # ------------------------------------------------------------------
+
+    def _build_spread_list(self, data: dict) -> None:
+        """
+        Replicate the page-pipeline from logic._process_single_file so
+        the preview exactly mirrors what the output PDF will contain.
+
+        Populates self._spreads with tuples:
+          (a, b)    — two-page spread  (b is None for a single page)
+
+        keep_single pages are present but act as pairing barriers:
+        they are never paired with the page before or after them.
+        """
+        cover_alone:  bool = data.get("cover_alone", False)
+        start:        int  = data["start"]
+        end:          int  = data["end"]
+        excluded:     set  = data["exclude"]
+        keep_single:  set  = data.get("keep_single", set())
+
         try:
-            doc = fitz.open(data["path"])
-            pagine_valide = [
-                p for p in range(data["start"], data["end"])
-                if p not in data["exclude"] and p < len(doc)
+            self._doc  = fitz.open(data["path"])
+            n          = len(self._doc)
+            range_start = start
+
+            # 1. Cover page
+            if cover_alone and start == 0 and n > 0 and 0 not in excluded:
+                self._spreads.append((0, None))
+                range_start = 1
+
+            # 2. Pre-range singles
+            pre_first = 1 if (cover_alone and start == 0) else 0
+            for p in range(pre_first, start):
+                if p not in excluded and p < n:
+                    self._spreads.append((p, None))
+
+            # 3. Paired range (same barrier logic as logic._process_single_file)
+            valid = [
+                p for p in range(range_start, end)
+                if p not in excluded and p < n
             ]
+            pair_idx = 0
+            while pair_idx < len(valid):
+                left  = valid[pair_idx]
+                left_is_single  = left in keep_single
 
-            if not pagine_valide:
-                ctk.CTkLabel(
-                    self,
-                    text="Nessuna pagina nel range selezionato.",
-                    font=("Roboto", 13),
-                ).pack(padx=20, pady=30)
-                self.geometry("380x100")
-                doc.close()
-                return
+                has_right       = pair_idx + 1 < len(valid)
+                right           = valid[pair_idx + 1] if has_right else -1
+                right_is_single = has_right and (right in keep_single)
 
-            mat = fitz.Matrix(self._SCALE, self._SCALE)
+                can_pair = has_right and not left_is_single and not right_is_single
 
-            def to_ctk(idx: int) -> tuple:
-                pix = doc[idx].get_pixmap(matrix=mat)
-                img = Image.open(io.BytesIO(pix.tobytes("png")))
-                return (
-                    ctk.CTkImage(light_image=img, dark_image=img,
-                                 size=(img.width, img.height)),
-                    img.width,
-                    img.height,
-                )
-
-            if len(pagine_valide) >= 2:
-                # Orientale: la pagina di DESTRA va mostrata per prima visivamente
-                if manga_mode:
-                    left_idx, right_idx = pagine_valide[1], pagine_valide[0]
-                    left_num, right_num = pagine_valide[1] + 1, pagine_valide[0] + 1
+                if can_pair:
+                    self._spreads.append((left, right))
+                    pair_idx += 2
                 else:
-                    left_idx, right_idx = pagine_valide[0], pagine_valide[1]
-                    left_num, right_num = pagine_valide[0] + 1, pagine_valide[1] + 1
+                    self._spreads.append((left, None))
+                    pair_idx += 1
 
-                img_l, wl, hl = to_ctk(left_idx)
-                img_r, wr, hr = to_ctk(right_idx)
-
-                row = ctk.CTkFrame(self, fg_color="transparent")
-                row.pack(padx=10, pady=(10, 4))
-                ctk.CTkLabel(row, image=img_l, text="").pack(side="left", padx=2)
-
-                # separatore verticale
-                ctk.CTkFrame(row, width=2, fg_color="#3b8ed0").pack(
-                    side="left", fill="y", pady=4)
-
-                ctk.CTkLabel(row, image=img_r, text="").pack(side="left", padx=2)
-
-                mode_str = "Orientale  ←  (destra → sinistra)" if manga_mode \
-                           else "Occidentale  →  (sinistra → destra)"
-                ctk.CTkLabel(
-                    self,
-                    text=f"Modalità: {mode_str}\n"
-                         f"Pag. {left_num}  |  Pag. {right_num}",
-                    font=("Roboto", 11),
-                    text_color="#95A5A6",
-                ).pack(pady=(0, 10))
-
-                total_w = wl + wr + 60
-                total_h = max(hl, hr) + 90
-                self.geometry(f"{total_w}x{total_h}")
-
-            else:
-                img, w, h = to_ctk(pagine_valide[0])
-                ctk.CTkLabel(self, image=img, text="").pack(padx=10, pady=10)
-                ctk.CTkLabel(
-                    self,
-                    text=f"Solo 1 pagina nel range — verrà inserita singola (pag. {pagine_valide[0]+1})",
-                    font=("Roboto", 11),
-                    text_color="#F39C12",
-                ).pack(pady=(0, 10))
-                self.geometry(f"{w + 40}x{h + 80}")
-
-            doc.close()
+            # 4. Post-range singles
+            for p in range(end, n):
+                if p not in excluded:
+                    self._spreads.append((p, None))
 
         except Exception as exc:
+            self._build_error = str(exc)
+
+    # ------------------------------------------------------------------
+    # UI construction
+    # ------------------------------------------------------------------
+
+    def _build_ui(self) -> None:
+        """Create the dialog layout: image area, info label, nav bar."""
+
+        # -- Error state ------------------------------------------------
+        if hasattr(self, "_build_error"):
             ctk.CTkLabel(
                 self,
-                text=f"Impossibile generare l'anteprima:\n{exc}",
+                text=f"Cannot generate preview:\n{self._build_error}",
                 font=("Roboto", 12),
                 text_color="#E74C3C",
             ).pack(padx=20, pady=30)
-            self.geometry("420x130")
+            self.geometry("440x130")
+            return
+
+        if not self._spreads:
+            ctk.CTkLabel(
+                self,
+                text="No pages in the selected range.",
+                font=("Roboto", 13),
+            ).pack(padx=20, pady=30)
+            self.geometry("380x100")
+            return
+
+        # -- Image display (updated on navigation) ----------------------
+        self._image_label = ctk.CTkLabel(self, text="Loading preview…")
+        self._image_label.pack(padx=10, pady=(10, 4))
+
+        # -- Spread info label ------------------------------------------
+        self._info_label = ctk.CTkLabel(
+            self, text="",
+            font=("Roboto", 11), text_color="#95A5A6",
+        )
+        self._info_label.pack(pady=(0, 4))
+
+        # -- Navigation bar ---------------------------------------------
+        nav = ctk.CTkFrame(self, fg_color="transparent")
+        nav.pack(pady=(0, 12))
+
+        self._btn_prev = ctk.CTkButton(
+            nav, text="◀  Prev", width=96, height=30,
+            fg_color="#2C3E50", hover_color="#1A252F",
+            command=lambda: self._navigate(-1),
+        )
+        self._btn_prev.pack(side="left", padx=6)
+
+        # Page counter label (fixed width prevents layout jitter)
+        self._counter_label = ctk.CTkLabel(
+            nav, text="",
+            font=("Roboto", 12, "bold"), width=90,
+        )
+        self._counter_label.pack(side="left", padx=4)
+
+        self._btn_next = ctk.CTkButton(
+            nav, text="Next  ▶", width=96, height=30,
+            fg_color="#2C3E50", hover_color="#1A252F",
+            command=lambda: self._navigate(1),
+        )
+        self._btn_next.pack(side="left", padx=6)
+
+    # ------------------------------------------------------------------
+    # Navigation
+    # ------------------------------------------------------------------
+
+    def _navigate(self, delta: int) -> None:
+        """Move `delta` spreads relative to the current position."""
+        if not self._spreads:
+            return
+        new_idx = max(0, min(self._current + delta, len(self._spreads) - 1))
+        if new_idx != self._current:
+            self._show_spread(new_idx)
+
+    def _on_wheel(self, event) -> None:
+        """Translate scroll-wheel events into spread navigation."""
+        if event.delta != 0:
+            direction = 1 if event.delta < 0 else -1   # scroll down = next
+        else:
+            direction = 1 if event.num == 5 else -1    # Button-5 = scroll down
+        self._navigate(direction)
+
+    # ------------------------------------------------------------------
+    # Spread rendering
+    # ------------------------------------------------------------------
+
+    def _show_spread(self, idx: int) -> None:
+        """
+        Render spread at position *idx* and update the image label,
+        info text, counter, and window geometry.
+        """
+        self._current  = idx
+        spread         = self._spreads[idx]
+        left_page_idx, right_page_idx = spread   # right may be None
+
+        mat = fitz.Matrix(self._SCALE, self._SCALE)
+
+        def _page_to_pil(page_idx: int) -> Image.Image:
+            pix = self._doc[page_idx].get_pixmap(matrix=mat)
+            return Image.open(io.BytesIO(pix.tobytes("png")))
+
+        if right_page_idx is not None:
+            # ---- Two-page spread (respect Eastern / Western order) ----
+            if self._manga_mode:
+                # Eastern: right-to-left — the higher page index appears
+                # on the visual LEFT of the spread
+                pil_left  = _page_to_pil(right_page_idx)
+                pil_right = _page_to_pil(left_page_idx)
+                label_left_num  = right_page_idx + 1
+                label_right_num = left_page_idx  + 1
+                mode_str = "Eastern  (right-to-left)"
+            else:
+                pil_left  = _page_to_pil(left_page_idx)
+                pil_right = _page_to_pil(right_page_idx)
+                label_left_num  = left_page_idx  + 1
+                label_right_num = right_page_idx + 1
+                mode_str = "Western  (left-to-right)"
+
+            # Combine both thumbnails into one PIL image side-by-side
+            combined_w = pil_left.width + pil_right.width + 4  # 4px separator
+            combined_h = max(pil_left.height, pil_right.height)
+            canvas     = Image.new("RGB", (combined_w, combined_h), (59, 142, 208))
+            canvas.paste(pil_left,  (0, 0))
+            canvas.paste(pil_right, (pil_left.width + 4, 0))
+
+            ctk_img = ctk.CTkImage(
+                light_image=canvas, dark_image=canvas,
+                size=(combined_w, combined_h),
+            )
+            info = (
+                f"Mode: {mode_str}    "
+                f"Page {label_left_num}  |  Page {label_right_num}"
+            )
+            geom_w = combined_w + 40
+            geom_h = combined_h + 110
+
+        else:
+            # ---- Single page ------------------------------------------
+            pil_single = _page_to_pil(left_page_idx)
+            ctk_img    = ctk.CTkImage(
+                light_image=pil_single, dark_image=pil_single,
+                size=(pil_single.width, pil_single.height),
+            )
+            info    = f"Single page  (page {left_page_idx + 1})"
+            geom_w  = pil_single.width + 40
+            geom_h  = pil_single.height + 110
+
+        # Keep a reference so the garbage collector does not drop the image
+        self._image_ref = ctk_img
+
+        # Update the image, info text, counter, and nav buttons
+        self._image_label.configure(image=ctk_img, text="")
+        self._info_label.configure(text=info)
+        self._counter_label.configure(
+            text=f"{idx + 1} / {len(self._spreads)}"
+        )
+        self._btn_prev.configure(state="normal" if idx > 0 else "disabled")
+        self._btn_next.configure(
+            state="normal" if idx < len(self._spreads) - 1 else "disabled"
+        )
+
+        # Clamp geometry to a reasonable maximum so large PDFs don't overflow
+        max_w, max_h = 1200, 900
+        self.geometry(f"{min(geom_w, max_w)}x{min(geom_h, max_h)}")
+
+    # ------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------
+
+    def destroy(self) -> None:
+        """Close the fitz document before destroying the window."""
+        if self._doc is not None:
+            try:
+                self._doc.close()
+            except Exception:
+                pass
+            self._doc = None
+        super().destroy()
 
 
 # ============================================================
-#  Dialogo log errori  ★ NUOVO
+#  Error log dialog
 # ============================================================
 
 class ErrorLogDialog(ctk.CTkToplevel):
     """
-    Mostra i file che hanno generato errori durante il merge
-    con il relativo messaggio di eccezione.
+    Scrollable dialog that lists every file that failed during the merge
+    batch, along with its exception message.
     """
 
     def __init__(self, master, errors: list):
         super().__init__(master)
-        self.title("Log Errori")
-        self.geometry("520x360")
+        self.title("Error Log")
+        self.geometry("540x380")
         self.transient(master)
         self.grab_set()
 
         ctk.CTkLabel(
             self,
-            text=f"⚠️   {len(errors)} file non elaborati",
+            text=f"  {len(errors)} file(s) could not be processed",
             font=("Roboto", 14, "bold"),
             text_color="#E74C3C",
         ).pack(pady=(14, 6))
@@ -232,162 +572,191 @@ class ErrorLogDialog(ctk.CTkToplevel):
             card.pack(fill="x", pady=3, padx=4)
             ctk.CTkLabel(
                 card, text=fname,
-                font=("Roboto", 12, "bold"), text_color="#E74C3C",
+                font=("Roboto", 12, "bold"),
+                text_color="#E74C3C",
             ).pack(anchor="w", padx=10, pady=(6, 0))
             ctk.CTkLabel(
                 card, text=msg,
-                font=("Roboto", 11), text_color="#95A5A6",
-                wraplength=460, justify="left",
+                font=("Roboto", 11),
+                text_color="#95A5A6",
+                wraplength=470, justify="left",
             ).pack(anchor="w", padx=10, pady=(0, 6))
 
-        ctk.CTkButton(self, text="Chiudi", command=self.destroy).pack(pady=10)
+        ctk.CTkButton(self, text="Close", command=self.destroy).pack(pady=10)
 
 
 # ============================================================
-#  Singolo elemento PDF nella lista
+#  PDF list item
 # ============================================================
 
 class PDFItem(ctk.CTkFrame):
     """
-    Widget che rappresenta un PDF nella lista.
-    Espone get_data() per la logica e get_state()/restore_state()
-    per l'undo/redo.
+    A single row in the document list that represents one source PDF.
+
+    Public interface
+    ----------------
+    get_data()      -> dict   : data dict consumed by logic.elabora_documento
+    get_state()     -> dict   : full snapshot for undo/redo
+    restore_state() -> None   : restore from a snapshot
     """
 
     def __init__(self, master, file_path: str, app: "PDFPageMergerGUI"):
         super().__init__(master)
-        self.file_path = file_path
-        self.app = app
-        self.exclusions = ""
-        self._drag_y_anchor: int = 0  # y_root al momento del press
+        self.file_path       = file_path
+        self.app             = app
+        self.exclusions      = ""    # pages to fully REMOVE from output
+        self.keep_single_str = ""    # pages to keep but never pair
+        self._drag_y_anchor: int = 0   # y_root captured at drag start
 
+        # Open briefly to count pages, then close
         doc = fitz.open(file_path)
-        self.max_pagine = len(doc)
+        self.max_pages = len(doc)
         doc.close()
 
-        is_single = self.max_pagine <= 1
-        slider_to = 1.1 if is_single else self.max_pagine
-        steps = 1 if is_single else self.max_pagine - 1
+        is_single  = self.max_pages <= 1
+        slider_to  = 1.1          if is_single else self.max_pages
+        step_count = 1            if is_single else self.max_pages - 1
 
         # ----------------------------------------------------------------
-        # Header
+        # Header row
         # ----------------------------------------------------------------
-        self.header = ctk.CTkFrame(self, fg_color="transparent")
-        self.header.pack(fill="x", padx=10, pady=(6, 0))
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.pack(fill="x", padx=10, pady=(6, 0))
 
-        # — Drag handle (⠿)
-        drag_lbl = ctk.CTkLabel(
-            self.header, text="⠿",
-            font=("Roboto", 18), text_color="#5D6D7E", cursor="fleur",
+        # Drag handle — mouse bindings produce reorder via _drag_* methods
+        drag_handle = ctk.CTkLabel(
+            header, text=":::",
+            font=("Roboto", 14, "bold"),
+            text_color="#5D6D7E",
+            cursor="fleur",
         )
-        drag_lbl.pack(side="left", padx=(0, 6))
-        drag_lbl.bind("<ButtonPress-1>",   self._drag_start)
-        drag_lbl.bind("<B1-Motion>",       self._drag_motion)
-        drag_lbl.bind("<ButtonRelease-1>", self._drag_end)
+        drag_handle.pack(side="left", padx=(0, 6))
+        drag_handle.bind("<ButtonPress-1>",   self._drag_start)
+        drag_handle.bind("<B1-Motion>",       self._drag_motion)
+        drag_handle.bind("<ButtonRelease-1>", self._drag_end)
 
-        # — Nome file
+        # File name label
         ctk.CTkLabel(
-            self.header,
+            header,
             text=os.path.basename(file_path),
             font=("Roboto", 12, "bold"),
             text_color="#2ecc71",
         ).pack(side="left")
 
-        # — Info pagine
+        # Page count badge
         ctk.CTkLabel(
-            self.header,
-            text=f"  •  {self.max_pagine} pag.",
+            header,
+            text=f"  •  {self.max_pages} pages",
             font=("Roboto", 11),
             text_color="#95A5A6",
         ).pack(side="left")
 
-        # — Pulsanti a destra (impilati da destra verso sinistra)
+        # Right-side action buttons (packed right-to-left)
         ctk.CTkButton(
-            self.header, text="✕", width=26, height=22,
+            header, text="X", width=28, height=22,
             fg_color="#C0392B", hover_color="#A93226",
-            command=lambda: app.rimuovi_pdf(self),
+            command=lambda: app.remove_pdf(self),
         ).pack(side="right", padx=2)
         ctk.CTkButton(
-            self.header, text="▼", width=26, height=22,
+            header, text="Down", width=48, height=22,
             fg_color="#34495E", hover_color="#2C3E50",
-            command=lambda: app.muovi_giu(self),
+            command=lambda: app.move_down(self),
         ).pack(side="right", padx=2)
         ctk.CTkButton(
-            self.header, text="▲", width=26, height=22,
+            header, text="Up", width=36, height=22,
             fg_color="#34495E", hover_color="#2C3E50",
-            command=lambda: app.muovi_su(self),
+            command=lambda: app.move_up(self),
         ).pack(side="right", padx=2)
 
-        # — Esclusioni (...)
-        self.btn_dots = ctk.CTkButton(
-            self.header, text="...", width=32, height=22,
+        # Page-exclusion button — turns orange when exclusions are active
+        self.btn_exclude = ctk.CTkButton(
+            header, text="Remove Pages", width=96, height=22,
             fg_color="#5D6D7E", hover_color="#4A5568",
-            command=self.open_exclusion_dialog,
+            command=self._open_exclusion_dialog,
         )
-        self.btn_dots.pack(side="right", padx=2)
+        self.btn_exclude.pack(side="right", padx=2)
 
-        # — Anteprima (👁)  ★ NUOVO
+        # Keep-single button — turns teal when active
+        self.btn_keep_single = ctk.CTkButton(
+            header, text="Keep Single", width=88, height=22,
+            fg_color="#5D6D7E", hover_color="#4A5568",
+            command=self._open_keep_single_dialog,
+        )
+        self.btn_keep_single.pack(side="right", padx=2)
+
+        # Preview button
         ctk.CTkButton(
-            self.header, text="👁", width=32, height=22,
+            header, text="Preview", width=64, height=22,
             fg_color="#1A5276", hover_color="#154360",
-            command=lambda: app.mostra_anteprima(self),
+            command=lambda: app.show_preview(self),
         ).pack(side="right", padx=2)
 
         # ----------------------------------------------------------------
-        # Copertina singola  ★ NUOVO
+        # Cover-alone option
         # ----------------------------------------------------------------
         self.cover_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(
             self,
-            text="Copertina singola  (pag. 1 sempre sola, non affiancata)",
+            text="Keep cover page alone  (page 1 is never paired)",
             variable=self.cover_var,
             font=("Roboto", 11),
         ).pack(anchor="w", padx=22, pady=(6, 0))
 
         # ----------------------------------------------------------------
-        # Slider  Inizio
+        # Start slider
         # ----------------------------------------------------------------
-        self.label_s = ctk.CTkLabel(self, text="Inizio: 1", font=("Roboto", 13, "bold"))
-        self.label_s.pack(padx=20, anchor="w", pady=(4, 0))
-        self.slider_s = ctk.CTkSlider(
-            self, from_=1, to=slider_to, number_of_steps=steps,
-            height=18, command=self.update_labels,
+        self.lbl_start = ctk.CTkLabel(
+            self, text="Start: 1", font=("Roboto", 13, "bold"),
         )
-        self.slider_s.set(1)
-        self.slider_s.pack(fill="x", padx=20)
+        self.lbl_start.pack(padx=20, anchor="w", pady=(4, 0))
+        self.slider_start = ctk.CTkSlider(
+            self, from_=1, to=slider_to,
+            number_of_steps=step_count, height=18,
+            command=self._update_labels,
+        )
+        self.slider_start.set(1)
+        self.slider_start.pack(fill="x", padx=20)
 
         # ----------------------------------------------------------------
-        # Slider  Fine
+        # End slider
         # ----------------------------------------------------------------
-        self.label_e = ctk.CTkLabel(
-            self, text=f"Fine: {self.max_pagine}", font=("Roboto", 13, "bold"))
-        self.label_e.pack(padx=20, anchor="w", pady=(4, 0))
-        self.slider_e = ctk.CTkSlider(
-            self, from_=1, to=slider_to, number_of_steps=steps,
-            height=18, command=self.update_labels,
+        self.lbl_end = ctk.CTkLabel(
+            self, text=f"End: {self.max_pages}", font=("Roboto", 13, "bold"),
         )
-        self.slider_e.set(self.max_pagine)
-        self.slider_e.pack(fill="x", padx=20, pady=(0, 10))
+        self.lbl_end.pack(padx=20, anchor="w", pady=(4, 0))
+        self.slider_end = ctk.CTkSlider(
+            self, from_=1, to=slider_to,
+            number_of_steps=step_count, height=18,
+            command=self._update_labels,
+        )
+        self.slider_end.set(self.max_pages)
+        self.slider_end.pack(fill="x", padx=20, pady=(0, 10))
 
+        # Disable sliders for single-page PDFs (nothing to range)
         if is_single:
-            self.slider_s.configure(state="disabled")
-            self.slider_e.configure(state="disabled")
+            self.slider_start.configure(state="disabled")
+            self.slider_end.configure(state="disabled")
 
     # ----------------------------------------------------------------
-    # Drag & drop interno  ★ NUOVO
+    # Drag-to-reorder (internal list DnD)
     # ----------------------------------------------------------------
 
     def _drag_start(self, event) -> None:
-        self._drag_y_anchor = event.y_root
-        self.app._drag_item = self
+        self._drag_y_anchor  = event.y_root
+        self.app._drag_item  = self
 
     def _drag_motion(self, event) -> None:
+        """
+        On motion, compute vertical displacement and swap with neighbour
+        when the cursor crosses the midpoint of this widget's height.
+        No `break` is used; early exit is handled by an outer condition.
+        """
         if self.app._drag_item is not self:
             return
-        dy = event.y_root - self._drag_y_anchor
-        # Soglia: metà dell'altezza corrente del widget (adattiva al contenuto)
+
+        dy        = event.y_root - self._drag_y_anchor
         threshold = max(self.winfo_height() * 0.45, 30)
-        idx = self.app.items.index(self)
+        idx       = self.app.items.index(self)
 
         if dy < -threshold and idx > 0:
             self.app._drag_snapshot()
@@ -399,140 +768,178 @@ class PDFItem(ctk.CTkFrame):
             self._drag_y_anchor = event.y_root
 
     def _drag_end(self, event) -> None:
-        self.app._drag_item = None
+        self.app._drag_item    = None
         self.app._drag_snapped = False
 
     # ----------------------------------------------------------------
-    # Esclusioni
+    # Page exclusion
     # ----------------------------------------------------------------
 
-    def open_exclusion_dialog(self) -> None:
-        dialog = ExclusionDialog(self.winfo_toplevel(), self.exclusions, self.max_pagine)
+    def _open_exclusion_dialog(self) -> None:
+        dialog = ExclusionDialog(
+            self.winfo_toplevel(), self.exclusions, self.max_pages
+        )
         self.master.wait_window(dialog)
         self.exclusions = dialog.result
-        self.btn_dots.configure(
+        # Visual feedback: orange when exclusions are active
+        self.btn_exclude.configure(
             fg_color="#F39C12" if self.exclusions.strip() else "#5D6D7E"
         )
 
-    def parse_exclusions(self) -> set:
-        excluded: set = set()
-        for part in re.split(r"[,\s]+", self.exclusions):
-            if "-" in part:
-                try:
-                    s, e = map(int, part.split("-"))
-                    excluded.update(range(s - 1, e))
-                except ValueError:
-                    pass
-            elif part.isdigit():
-                excluded.add(int(part) - 1)
-        return excluded
+    def _open_keep_single_dialog(self) -> None:
+        """Open the dialog for selecting pages to keep single (not paired)."""
+        dialog = KeepSingleDialog(
+            self.winfo_toplevel(), self.keep_single_str, self.max_pages
+        )
+        self.master.wait_window(dialog)
+        self.keep_single_str = dialog.result
+        # Visual feedback: teal when keep-single pages are active
+        self.btn_keep_single.configure(
+            fg_color="#117A65" if self.keep_single_str.strip() else "#5D6D7E"
+        )
+
+    def _parse_exclusions(self) -> set:
+        """
+        Convert the exclusion string (e.g. "1, 3-5, 10") into a set of
+        0-based page indices.  No `break` is used.
+        """
+        return _parse_page_range_string(self.exclusions)
+
+    def _parse_keep_single(self) -> set:
+        """
+        Convert the keep-single string into a set of 0-based page indices.
+        Reuses the same parser as exclusions.
+        """
+        return _parse_page_range_string(self.keep_single_str)
 
     # ----------------------------------------------------------------
-    # Aggiornamento label slider
+    # Slider label synchronisation
     # ----------------------------------------------------------------
 
-    def update_labels(self, _=None) -> None:
-        s, e = int(self.slider_s.get()), int(self.slider_e.get())
+    def _update_labels(self, _=None) -> None:
+        s = int(self.slider_start.get())
+        e = int(self.slider_end.get())
+        # Prevent start > end
         if s > e:
-            self.slider_s.set(e)
+            self.slider_start.set(e)
             s = e
-        self.label_s.configure(text=f"Inizio: {s}")
-        self.label_e.configure(text=f"Fine: {e}")
+        self.lbl_start.configure(text=f"Start: {s}")
+        self.lbl_end.configure(text=f"End: {e}")
 
     # ----------------------------------------------------------------
-    # Dati per la logica e l'undo/redo
+    # Data / state API
     # ----------------------------------------------------------------
 
     def get_data(self) -> dict:
+        """Return the task dict consumed by logic.elabora_documento."""
         return {
-            "path":        self.file_path,
-            "start":       int(self.slider_s.get()) - 1,
-            "end":         int(self.slider_e.get()),
-            "exclude":     self.parse_exclusions(),
-            "cover_alone": self.cover_var.get(),
+            "path":         self.file_path,
+            "start":        int(self.slider_start.get()) - 1,
+            "end":          int(self.slider_end.get()),
+            "exclude":      self._parse_exclusions(),
+            "keep_single":  self._parse_keep_single(),
+            "cover_alone":  self.cover_var.get(),
         }
 
     def get_state(self) -> dict:
-        """Snapshot completo per undo/redo."""
+        """Return a full snapshot suitable for undo/redo storage."""
         return {
-            "path":        self.file_path,
-            "slider_s":    self.slider_s.get(),
-            "slider_e":    self.slider_e.get(),
-            "exclusions":  self.exclusions,
-            "cover_alone": self.cover_var.get(),
+            "path":            self.file_path,
+            "slider_s":        self.slider_start.get(),
+            "slider_e":        self.slider_end.get(),
+            "exclusions":      self.exclusions,
+            "keep_single_str": self.keep_single_str,
+            "cover_alone":     self.cover_var.get(),
         }
 
     def restore_state(self, state: dict) -> None:
-        """Ripristina lo stato da uno snapshot."""
-        self.exclusions = state["exclusions"]
-        self.slider_s.set(state["slider_s"])
-        self.slider_e.set(state["slider_e"])
+        """Restore this item's state from a previously saved snapshot."""
+        self.exclusions      = state["exclusions"]
+        self.keep_single_str = state.get("keep_single_str", "")
+        self.slider_start.set(state["slider_s"])
+        self.slider_end.set(state["slider_e"])
         self.cover_var.set(state["cover_alone"])
-        self.update_labels()
-        self.btn_dots.configure(
+        self._update_labels()
+        self.btn_exclude.configure(
             fg_color="#F39C12" if self.exclusions.strip() else "#5D6D7E"
+        )
+        self.btn_keep_single.configure(
+            fg_color="#117A65" if self.keep_single_str.strip() else "#5D6D7E"
         )
 
 
 # ============================================================
-#  Finestra principale
+#  Main application window
 # ============================================================
 
 class PDFPageMergerGUI(ctk.CTk, TkinterDnD.DnDWrapper):
-    _MAX_UNDO = 25
+    """
+    Top-level window for PDF Page Merger.
+
+    Keyboard shortcuts
+    ------------------
+    Ctrl+Z          : Undo last list change
+    Ctrl+Y          : Redo
+    Ctrl+Shift+Z    : Redo (alternative)
+    """
+
+    _MAX_UNDO = 25   # maximum number of undo snapshots retained
 
     def __init__(self):
         super().__init__()
-        self._inizializza_tkdnd()
+        self._init_tkdnd()
 
         self.title("PDF Page Merger")
-        self.geometry("740x720")
-        self.minsize(560, 500)
+        self.geometry("760x730")
+        self.minsize(580, 520)
 
-        # Stato interno
-        self.items: list = []
-        self._undo_stack: list = []
-        self._redo_stack: list = []
-        self._drag_item = None
-        self._drag_snapped = False          # snapshot già salvato per il drag corrente
-        self._is_restoring = False          # guard per evitare snapshot ricorsivi
+        # ---- application state ----
+        self.items:          list = []
+        self._undo_stack:    list = []
+        self._redo_stack:    list = []
+        self._drag_item           = None
+        self._drag_snapped:  bool = False   # True after first swap in a drag
+        self._is_restoring:  bool = False   # guard against recursive snapshots
 
-        # Cartella output  ★ NUOVO
+        # Output folder (defaults to Documents/pdf-page-merger)
         default_out = get_documents_path() / "pdf-page-merger"
         self.output_dir_var = ctk.StringVar(value=str(default_out))
 
-        # Tema corrente
-        self._theme_mode = ctk.get_appearance_mode().lower()  # "dark" o "light"
+        # Current appearance mode
+        self._theme_mode: str = ctk.get_appearance_mode().lower()
 
         self._build_ui()
         self._bind_mouse_wheel(self)
 
-        # Shortcut tastiera  ★ NUOVO
-        self.bind("<Control-z>",       lambda _e: self._undo())
-        self.bind("<Control-y>",       lambda _e: self._redo())
-        self.bind("<Control-Z>",       lambda _e: self._redo())   # Ctrl+Shift+Z
+        # Global keyboard shortcuts for undo / redo
+        self.bind("<Control-z>", lambda _e: self._undo())
+        self.bind("<Control-y>", lambda _e: self._redo())
+        self.bind("<Control-Z>", lambda _e: self._redo())  # Ctrl+Shift+Z
 
     # ============================================================
-    #  Inizializzazione tkdnd  (invariato)
+    #  tkdnd initialisation
     # ============================================================
 
-    def _inizializza_tkdnd(self):
+    def _init_tkdnd(self) -> None:
+        """Load the native tkdnd library for the current platform."""
         try:
             import tkinterdnd2
             subdir = _get_tkdnd_subdir()
             if subdir is None:
                 return
-            path = os.path.join(os.path.dirname(tkinterdnd2.__file__), "tkdnd", subdir)
-            self.tk.call("lappend", "auto_path", path)
+            lib_path = os.path.join(
+                os.path.dirname(tkinterdnd2.__file__), "tkdnd", subdir
+            )
+            self.tk.call("lappend", "auto_path", lib_path)
             self.tk.call("package", "require", "tkdnd")
         except Exception:
-            pass
+            pass  # DnD is optional; manual file selection still works
 
     # ============================================================
-    #  Mouse wheel  (invariato)
+    #  Mouse-wheel binding (recursive, applied to all child widgets)
     # ============================================================
 
-    def _bind_mouse_wheel(self, widget):
+    def _bind_mouse_wheel(self, widget) -> None:
         try:
             widget.bind("<MouseWheel>", self._on_mouse_wheel)
             widget.bind("<Button-4>",   self._on_mouse_wheel)
@@ -542,7 +949,7 @@ class PDFPageMergerGUI(ctk.CTk, TkinterDnD.DnDWrapper):
         for child in widget.winfo_children():
             self._bind_mouse_wheel(child)
 
-    def _on_mouse_wheel(self, event):
+    def _on_mouse_wheel(self, event) -> None:
         if not self.items:
             return
         direction = (-1 if event.delta > 0 else 1) if event.delta != 0 \
@@ -553,217 +960,241 @@ class PDFPageMergerGUI(ctk.CTk, TkinterDnD.DnDWrapper):
             pass
 
     # ============================================================
-    #  Costruzione interfaccia
+    #  UI construction
     # ============================================================
 
-    def _build_ui(self):
-        # ---- Barra superiore ----------------------------------------
-        top = ctk.CTkFrame(self, fg_color="transparent")
-        top.pack(fill="x", padx=18, pady=(12, 0))
+    def _build_ui(self) -> None:
+        # ---- Top bar ------------------------------------------------
+        top_bar = ctk.CTkFrame(self, fg_color="transparent")
+        top_bar.pack(fill="x", padx=18, pady=(12, 0))
 
         ctk.CTkLabel(
-            top, text="📚 PDF Page Merger", font=("Roboto", 22, "bold"),
+            top_bar, text="PDF Page Merger",
+            font=("Roboto", 22, "bold"),
         ).pack(side="left")
 
-        # Tema  ★ NUOVO
-        icon = "☀️" if self._theme_mode == "dark" else "🌙"
+        # Theme toggle — solid background, no emoji, text-only label
+        theme_label = "Switch to Light" if self._theme_mode == "dark" \
+                      else "Switch to Dark"
         self.btn_theme = ctk.CTkButton(
-            top, text=icon, width=38, height=28,
-            fg_color="transparent", hover_color="#2C3E50",
+            top_bar,
+            text=theme_label,
+            width=120, height=28,
+            fg_color="#546E7A",          # slate-grey: visible on both themes
+            hover_color="#37474F",
+            text_color="white",
             command=self._toggle_theme,
         )
         self.btn_theme.pack(side="right", padx=(4, 0))
 
-        # Redo  ★ NUOVO
+        # Redo button
         self.btn_redo = ctk.CTkButton(
-            top, text="↪  Redo", width=80, height=28,
+            top_bar, text="Redo", width=72, height=28,
             fg_color="#1A5276", hover_color="#154360",
             state="disabled", command=self._redo,
         )
         self.btn_redo.pack(side="right", padx=2)
 
-        # Undo  ★ NUOVO
+        # Undo button
         self.btn_undo = ctk.CTkButton(
-            top, text="↩  Undo", width=80, height=28,
+            top_bar, text="Undo", width=72, height=28,
             fg_color="#1A5276", hover_color="#154360",
             state="disabled", command=self._undo,
         )
         self.btn_undo.pack(side="right", padx=2)
 
-        # ---- Modalità lettura ----------------------------------------
-        self.style_var = ctk.StringVar(value="Orientale")
+        # ---- Reading-direction toggle --------------------------------
+        self.style_var = ctk.StringVar(value="Eastern")
         ctk.CTkSegmentedButton(
-            self, values=["Orientale", "Occidentale"],
+            self,
+            values=["Eastern", "Western"],
             variable=self.style_var,
         ).pack(pady=8)
 
-        # ---- Riga opzioni (compressione)  ★ NUOVO ------------------
-        opt = ctk.CTkFrame(self, fg_color="transparent")
-        opt.pack(fill="x", padx=18, pady=(0, 4))
+        # ---- Compression option row ---------------------------------
+        opt_row = ctk.CTkFrame(self, fg_color="transparent")
+        opt_row.pack(fill="x", padx=18, pady=(0, 4))
 
-        ctk.CTkLabel(opt, text="Compressione output:",
-                     font=("Roboto", 12)).pack(side="left")
-        self.compress_var = ctk.StringVar(value="Media")
+        ctk.CTkLabel(
+            opt_row, text="Output compression:",
+            font=("Roboto", 12),
+        ).pack(side="left")
+        self.compress_var = ctk.StringVar(value="Medium")
         ctk.CTkComboBox(
-            opt,
+            opt_row,
             values=list(COMPRESS_PRESETS.keys()),
             variable=self.compress_var,
             width=120,
-        ).pack(side="left", padx=(6, 0))
+        ).pack(side="left", padx=(8, 0))
 
-        # ---- Cartella output  ★ NUOVO --------------------------------
+        # ---- Output-folder row --------------------------------------
         out_row = ctk.CTkFrame(self, fg_color="transparent")
         out_row.pack(fill="x", padx=18, pady=(0, 6))
 
-        ctk.CTkLabel(out_row, text="📂  Output:", font=("Roboto", 12)).pack(side="left")
+        ctk.CTkLabel(
+            out_row, text="Output folder:", font=("Roboto", 12),
+        ).pack(side="left")
         ctk.CTkLabel(
             out_row,
             textvariable=self.output_dir_var,
-            font=("Roboto", 11), text_color="#95A5A6",
-            anchor="w",
+            font=("Roboto", 11), text_color="#95A5A6", anchor="w",
         ).pack(side="left", padx=6, fill="x", expand=True)
         ctk.CTkButton(
-            out_row, text="Cambia", width=72, height=26,
+            out_row, text="Change", width=72, height=26,
             fg_color="#1b5e20", hover_color="#145A32",
-            command=self._select_output_dir,
+            command=self._select_output_folder,
         ).pack(side="right")
 
-        # ---- Drop zone -----------------------------------------------
+        # ---- Drop zone ----------------------------------------------
         self.drop_frame = ctk.CTkFrame(
-            self, height=68, border_width=2, border_color="#3b8ed0")
+            self, height=68, border_width=2, border_color="#3b8ed0",
+        )
         self.drop_frame.pack(pady=6, padx=18, fill="x")
         self.drop_frame.pack_propagate(False)
         ctk.CTkLabel(
             self.drop_frame,
-            text="Trascina qui i PDF  •  Puoi trascinare più file contemporaneamente",
+            text="Drop PDF files here  •  Multiple files supported",
         ).pack(expand=True)
         self.drop_frame.drop_target_register(DND_FILES)
-        self.drop_frame.dnd_bind("<<Drop>>", self.gestisci_drop)
+        self.drop_frame.dnd_bind("<<Drop>>", self._on_drop)
 
         ctk.CTkButton(
-            self, text="📁  Seleziona File", command=self.seleziona_file,
+            self, text="Browse Files", command=self._browse_files,
             fg_color="#1b5e20", hover_color="#145A32", height=32,
         ).pack(pady=4)
 
-        # ---- Lista documenti (scrollable) ----------------------------
-        self.scroll_frame = ctk.CTkScrollableFrame(self, label_text="Lista Documenti")
-        # verrà mostrato al primo file aggiunto
+        # ---- Scrollable document list (added on first file) ---------
+        self.scroll_frame = ctk.CTkScrollableFrame(
+            self, label_text="Document List",
+        )
 
-        # ---- Contenitore progresso  ★ NUOVO (nascosto di default) ---
+        # ---- Progress container (hidden until merge starts) ---------
         self.progress_container = ctk.CTkFrame(self, fg_color="transparent")
 
-        self.lbl_file_corrente = ctk.CTkLabel(
+        self.lbl_current_file = ctk.CTkLabel(
             self.progress_container, text="",
             font=("Roboto", 11), text_color="#95A5A6",
         )
-        self.lbl_file_corrente.pack(pady=(6, 0))
+        self.lbl_current_file.pack(pady=(6, 0))
 
         self.progress_file = ctk.CTkProgressBar(self.progress_container)
         self.progress_file.set(0)
         self.progress_file.pack(fill="x", padx=50, pady=2)
 
-        self.lbl_totale = ctk.CTkLabel(
+        self.lbl_overall = ctk.CTkLabel(
             self.progress_container, text="",
             font=("Roboto", 11), text_color="#95A5A6",
         )
-        self.lbl_totale.pack()
+        self.lbl_overall.pack()
 
-        self.progress_bar = ctk.CTkProgressBar(self.progress_container)
-        self.progress_bar.set(0)
-        self.progress_bar.pack(fill="x", padx=50, pady=(2, 8))
+        self.progress_overall = ctk.CTkProgressBar(self.progress_container)
+        self.progress_overall.set(0)
+        self.progress_overall.pack(fill="x", padx=50, pady=(2, 8))
 
-        # ---- Pulsante MERGE PDF (sempre in fondo) --------------------
-        self.btn_avvia = ctk.CTkButton(
-            self, text="MERGE PDF", command=self.esegui,
+        # ---- Merge button (always anchored to the bottom) -----------
+        self.btn_merge = ctk.CTkButton(
+            self, text="MERGE PDF", command=self._run_merge,
             state="disabled", font=("Roboto", 14, "bold"), height=42,
         )
-        self.btn_avvia.pack(pady=12, side="bottom")
+        self.btn_merge.pack(pady=12, side="bottom")
 
     # ============================================================
-    #  Azioni UI
+    #  File management
     # ============================================================
 
-    def seleziona_file(self):
-        paths = ctk.filedialog.askopenfilenames(filetypes=[("PDF Files", "*.pdf")])
+    def _browse_files(self) -> None:
+        paths = ctk.filedialog.askopenfilenames(
+            filetypes=[("PDF Files", "*.pdf")]
+        )
         for p in paths:
-            self.aggiungi_pdf(p)
+            self._add_pdf(p)
 
-    def gestisci_drop(self, event):
+    def _on_drop(self, event) -> None:
         for p in _parse_drop_paths(event.data):
             if p.lower().endswith(".pdf"):
-                self.aggiungi_pdf(p)
+                self._add_pdf(p)
 
-    def aggiungi_pdf(self, path: str):
-        # ★ Rilevamento duplicati
+    def _add_pdf(self, path: str) -> None:
+        """
+        Add a PDF to the list after checking for duplicates.
+        A snapshot is taken before the change to support undo.
+        """
+        # Duplicate guard
         if any(item.file_path == path for item in self.items):
             CTkMessagebox(
-                title="File già presente",
-                message=f"Questo PDF è già in lista:\n{os.path.basename(path)}",
+                title="Already in list",
+                message=f"This file is already loaded:\n{os.path.basename(path)}",
                 icon="warning",
             )
             return
 
-        self._snapshot()  # ★ undo
+        self._snapshot()   # save state for undo
 
+        # Show the scroll frame on the first file
         if not self.items:
             self.scroll_frame.pack(
                 pady=5, padx=18, fill="both", expand=True,
-                before=self.btn_avvia,
+                before=self.btn_merge,
             )
 
         item = PDFItem(self.scroll_frame, path, self)
         item.pack(fill="x", pady=5, padx=5)
         self.items.append(item)
         self._bind_mouse_wheel(item)
-        self.btn_avvia.configure(state="normal")
+        self.btn_merge.configure(state="normal")
 
-    def rimuovi_pdf(self, item):
-        self._snapshot()  # ★ undo
+    def remove_pdf(self, item: PDFItem) -> None:
+        self._snapshot()
         item.destroy()
         self.items.remove(item)
         if not self.items:
             self.scroll_frame.pack_forget()
-            self.btn_avvia.configure(state="disabled")
+            self.btn_merge.configure(state="disabled")
 
-    def muovi_su(self, item):
+    def move_up(self, item: PDFItem) -> None:
         idx = self.items.index(item)
         if idx > 0:
-            self._snapshot()  # ★ undo
+            self._snapshot()
             self.items[idx], self.items[idx - 1] = self.items[idx - 1], self.items[idx]
-            self.refresh_list()
+            self._refresh_list()
 
-    def muovi_giu(self, item):
+    def move_down(self, item: PDFItem) -> None:
         idx = self.items.index(item)
         if idx < len(self.items) - 1:
-            self._snapshot()  # ★ undo
+            self._snapshot()
             self.items[idx], self.items[idx + 1] = self.items[idx + 1], self.items[idx]
-            self.refresh_list()
+            self._refresh_list()
 
-    def refresh_list(self):
+    def _refresh_list(self) -> None:
+        """Re-pack all items in their current order."""
         for item in self.items:
             item.pack_forget()
             item.pack(fill="x", pady=5, padx=5)
 
     # ============================================================
-    #  Drag & drop interno  ★ NUOVO
+    #  Internal drag-to-reorder helpers
     # ============================================================
 
-    def _drag_snapshot(self):
-        """Salva snapshot solo al primo swap del drag corrente."""
+    def _drag_snapshot(self) -> None:
+        """Take a snapshot only on the first swap of the current drag gesture."""
         if not self._drag_snapped:
             self._snapshot()
             self._drag_snapped = True
 
-    def _swap_items(self, a: int, b: int):
+    def _swap_items(self, a: int, b: int) -> None:
         self.items[a], self.items[b] = self.items[b], self.items[a]
-        self.refresh_list()
+        self._refresh_list()
 
     # ============================================================
-    #  Undo / Redo  ★ NUOVO
+    #  Undo / Redo
     # ============================================================
 
-    def _snapshot(self):
-        """Salva lo stato corrente nello stack undo."""
+    def _snapshot(self) -> None:
+        """
+        Save the current list state onto the undo stack.
+        Called before every mutating operation.
+        Does nothing while a restore is in progress (guard flag).
+        """
         if self._is_restoring:
             return
         state = [item.get_state() for item in self.items]
@@ -771,179 +1202,203 @@ class PDFPageMergerGUI(ctk.CTk, TkinterDnD.DnDWrapper):
         if len(self._undo_stack) > self._MAX_UNDO:
             self._undo_stack.pop(0)
         self._redo_stack.clear()
-        self._update_ud_buttons()
+        self._update_undo_buttons()
 
-    def _undo(self):
+    def _undo(self) -> None:
         if not self._undo_stack:
             return
         self._redo_stack.append([item.get_state() for item in self.items])
         self._restore_state(self._undo_stack.pop())
-        self._update_ud_buttons()
+        self._update_undo_buttons()
 
-    def _redo(self):
+    def _redo(self) -> None:
         if not self._redo_stack:
             return
         self._undo_stack.append([item.get_state() for item in self.items])
         self._restore_state(self._redo_stack.pop())
-        self._update_ud_buttons()
+        self._update_undo_buttons()
 
-    def _restore_state(self, state: list):
+    def _restore_state(self, state: list) -> None:
+        """
+        Rebuild the item list from a snapshot.
+        The `_is_restoring` guard prevents snapshot() from being triggered
+        by the item additions that happen during the restore.
+        """
         self._is_restoring = True
         try:
             for item in self.items[:]:
                 item.destroy()
             self.items.clear()
 
-            for s in state:
-                item = PDFItem(self.scroll_frame, s["path"], self)
+            for saved in state:
+                item = PDFItem(self.scroll_frame, saved["path"], self)
                 item.pack(fill="x", pady=5, padx=5)
-                item.restore_state(s)
+                item.restore_state(saved)
                 self.items.append(item)
                 self._bind_mouse_wheel(item)
 
             if self.items:
-                # Assicura che scroll_frame sia visibile
+                # Re-show the scroll frame if it was hidden
                 try:
                     self.scroll_frame.pack_info()
                 except Exception:
                     self.scroll_frame.pack(
                         pady=5, padx=18, fill="both", expand=True,
-                        before=self.btn_avvia,
+                        before=self.btn_merge,
                     )
-                self.btn_avvia.configure(state="normal")
+                self.btn_merge.configure(state="normal")
             else:
                 self.scroll_frame.pack_forget()
-                self.btn_avvia.configure(state="disabled")
+                self.btn_merge.configure(state="disabled")
         finally:
             self._is_restoring = False
 
-    def _update_ud_buttons(self):
+    def _update_undo_buttons(self) -> None:
         self.btn_undo.configure(state="normal" if self._undo_stack else "disabled")
         self.btn_redo.configure(state="normal" if self._redo_stack else "disabled")
 
     # ============================================================
-    #  Anteprima  ★ NUOVO
+    #  Preview
     # ============================================================
 
-    def mostra_anteprima(self, item):
-        PreviewDialog(self, item.get_data(), self.style_var.get() == "Orientale")
-
-    # ============================================================
-    #  Tema  ★ NUOVO
-    # ============================================================
-
-    def _toggle_theme(self):
-        self._theme_mode = "light" if self._theme_mode == "dark" else "dark"
-        ctk.set_appearance_mode(self._theme_mode)
-        self.btn_theme.configure(
-            text="☀️" if self._theme_mode == "dark" else "🌙"
+    def show_preview(self, item: PDFItem) -> None:
+        """Open a PreviewDialog for the given PDF item."""
+        PreviewDialog(
+            self,
+            item.get_data(),
+            manga_mode=self.style_var.get() == "Eastern",
         )
 
     # ============================================================
-    #  Cartella output  ★ NUOVO
+    #  Theme toggle
     # ============================================================
 
-    def _select_output_dir(self):
+    def _toggle_theme(self) -> None:
+        """Switch between dark and light appearance modes."""
+        self._theme_mode = "light" if self._theme_mode == "dark" else "dark"
+        ctk.set_appearance_mode(self._theme_mode)
+        self.btn_theme.configure(
+            text=(
+                "Switch to Light"
+                if self._theme_mode == "dark"
+                else "Switch to Dark"
+            )
+        )
+
+    # ============================================================
+    #  Output folder selection
+    # ============================================================
+
+    def _select_output_folder(self) -> None:
         chosen = ctk.filedialog.askdirectory(
-            title="Scegli la cartella di output",
+            title="Select output folder",
             initialdir=self.output_dir_var.get(),
         )
         if chosen:
             self.output_dir_var.set(chosen)
 
     # ============================================================
-    #  Callback progresso  ★ NUOVO
+    #  Progress callbacks (called from the merge thread via idletasks)
     # ============================================================
 
-    def _cb_totale(self, val: float):
-        self.progress_bar.set(val)
-        n = len(self.items)
-        done = round(val * n)
-        self.lbl_totale.configure(text=f"Totale: {done} / {n} file")
+    def _cb_overall(self, value: float) -> None:
+        self.progress_overall.set(value)
+        total = len(self.items)
+        done  = round(value * total)
+        self.lbl_overall.configure(text=f"Overall: {done} / {total} files")
         self.update_idletasks()
 
-    def _cb_file(self, filename: str, val: float):
-        self.lbl_file_corrente.configure(text=f"📄  {filename}")
-        self.progress_file.set(val)
+    def _cb_file(self, filename: str, value: float) -> None:
+        self.lbl_current_file.configure(text=f"  {filename}")
+        self.progress_file.set(value)
         self.update_idletasks()
 
     # ============================================================
-    #  Esecuzione merge
+    #  Merge execution
     # ============================================================
 
-    def esegui(self):
-        # Mostra il contenitore di progresso
+    def _run_merge(self) -> None:
+        """Collect tasks, show progress UI, run the merge, show results."""
+        # Show progress area
         self.progress_container.pack(
-            fill="x", padx=18, pady=4, before=self.btn_avvia
+            fill="x", padx=18, pady=4, before=self.btn_merge,
         )
-        self.progress_bar.set(0)
+        self.progress_overall.set(0)
         self.progress_file.set(0)
-        self.lbl_file_corrente.configure(text="Avvio...")
-        self.lbl_totale.configure(text="")
-        self.btn_avvia.configure(state="disabled")
+        self.lbl_current_file.configure(text="Starting…")
+        self.lbl_overall.configure(text="")
+        self.btn_merge.configure(state="disabled")
         self.update()
 
-        tasks = [item.get_data() for item in self.items]
+        tasks   = [item.get_data() for item in self.items]
         outputs: list = []
-        errors: list = []
+        errors:  list = []
 
         try:
             outputs, errors = elabora_documento(
                 tasks,
-                manga_mode=self.style_var.get() == "Orientale",
-                output_dir=Path(self.output_dir_var.get()),
-                compress_preset=self.compress_var.get(),
-                callback_totale=self._cb_totale,
-                callback_file=self._cb_file,
+                manga_mode       = self.style_var.get() == "Eastern",
+                output_dir       = Path(self.output_dir_var.get()),
+                compress_preset  = self.compress_var.get(),
+                callback_totale  = self._cb_overall,
+                callback_file    = self._cb_file,
             )
         except Exception as exc:
-            CTkMessagebox(title="Errore critico", message=str(exc), icon="cancel")
+            CTkMessagebox(
+                title="Critical error", message=str(exc), icon="cancel",
+            )
         else:
             self._show_results(outputs, errors)
         finally:
             self.progress_container.pack_forget()
-            self.btn_avvia.configure(state="normal")
+            self.btn_merge.configure(state="normal")
 
-    def _show_results(self, outputs: list, errors: list):
+    def _show_results(self, outputs: list, errors: list) -> None:
+        """Display the appropriate result dialog based on success/error counts."""
         output_dir = Path(self.output_dir_var.get())
         n_ok  = len(outputs)
         n_err = len(errors)
 
         if n_err == 0:
-            # ★ Pulsante "Apri Cartella"
+            # All files succeeded
             dlg = CTkMessagebox(
-                title="Completato",
-                message=f"✅  {n_ok} file elaborati con successo!\n📂  {output_dir}",
+                title="Complete",
+                message=f"{n_ok} file(s) merged successfully!\n{output_dir}",
                 icon="check",
-                option_1="Apri Cartella",
+                option_1="Open Folder",
                 option_2="OK",
             )
-            if dlg.get() == "Apri Cartella":
+            if dlg.get() == "Open Folder":
                 _open_in_file_manager(output_dir)
 
         elif n_ok == 0:
+            # All files failed
             CTkMessagebox(
-                title="Errore",
-                message=f"Tutti i {n_err} file hanno generato errori.\nControlla il log per i dettagli.",
+                title="Error",
+                message=(
+                    f"All {n_err} file(s) encountered errors.\n"
+                    "Check the error log for details."
+                ),
                 icon="cancel",
             )
             ErrorLogDialog(self, errors)
 
         else:
+            # Mixed result
             dlg = CTkMessagebox(
-                title="Completato con avvisi",
+                title="Completed with warnings",
                 message=(
-                    f"✅  {n_ok} file elaborati correttamente\n"
-                    f"⚠️   {n_err} file con errori\n"
-                    f"📂  {output_dir}"
+                    f"{n_ok} file(s) merged successfully\n"
+                    f"{n_err} file(s) had errors\n"
+                    f"{output_dir}"
                 ),
                 icon="warning",
-                option_1="Apri Cartella",
-                option_2="Vedi Errori",
+                option_1="Open Folder",
+                option_2="View Errors",
                 option_3="OK",
             )
             choice = dlg.get()
-            if choice == "Apri Cartella":
+            if choice == "Open Folder":
                 _open_in_file_manager(output_dir)
-            elif choice == "Vedi Errori":
+            elif choice == "View Errors":
                 ErrorLogDialog(self, errors)
