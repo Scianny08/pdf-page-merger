@@ -891,7 +891,7 @@ class PDFPageMergerGUI(ctk.CTk, TkinterDnD.DnDWrapper):
         self._init_tkdnd()
 
         self.title("PDF Page Merger")
-        self.geometry("760x730")
+        self.geometry("800x600")
         self.minsize(580, 520)
 
         # Icon
