@@ -896,14 +896,14 @@ class PDFPageMergerGUI(ctk.CTk, TkinterDnD.DnDWrapper):
 
         # Icon
         try:
-            icon_path = Path(__file__).parent / "icon.png"
+            icon_path = Path(__file__).parent / "img" / "icon.png"
             if icon_path.exists():
                 icon_img = Image.open(icon_path)
                 system = platform.system()
 
                 if system == "Windows":
                     
-                    ico_path = Path(__file__).parent / "icon.ico"
+                    ico_path = Path(__file__).parent / "img" / "icon.ico"
                     if ico_path.exists():
                         # Imposta un AppUserModelID univoco — necessario per la taskbar
                         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
@@ -928,7 +928,7 @@ class PDFPageMergerGUI(ctk.CTk, TkinterDnD.DnDWrapper):
                         self.iconphoto(True, self._tk_icon)
 
                 elif system == "Darwin":
-                    icns_path = Path(__file__).parent / "icon.icns"
+                    icns_path = Path(__file__).parent / "img" / "icon.icns"
                     if icns_path.exists():
                         # macOS: usa osascript per impostare l'icona del dock
                         subprocess.Popen([
