@@ -318,7 +318,6 @@ class PreviewDialog(ctk.CTkToplevel):
         keep_single pages are present but act as pairing barriers:
         they are never paired with the page before or after them.
         """
-        cover_alone: bool = data.get("cover_alone", False)
         start:       int  = data["start"]
         end:         int  = data["end"]
         excluded:    set  = data["exclude"]
@@ -329,17 +328,12 @@ class PreviewDialog(ctk.CTkToplevel):
             n           = len(self._doc)
             range_start = start
 
-            # 1. Cover page
-            if cover_alone and start == 0 and n > 0 and 0 not in excluded:
-                self._spreads.append((0, None))
-                range_start = 1
-
-            # 2. Pre-range singles
-            pre_first = 1 if (cover_alone and start == 0) else 0
+            # 1. Pre-range singles
+            pre_first = 0
             for p in range(pre_first, start):
                 if p not in excluded and p < n:
                     self._spreads.append((p, None))
-
+            
             # 3. Paired range (same barrier logic as logic._process_single_file)
             valid = [
                 p for p in range(range_start, end)
@@ -760,16 +754,7 @@ class PDFItem(ctk.CTkFrame):
             command=lambda: app.show_preview(self),
         ).pack(side="right", padx=2)
 
-        # ----------------------------------------------------------------
-        # Cover-alone option
-        # ----------------------------------------------------------------
-        self.cover_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(
-            self,
-            text="Keep cover page alone  (page 1 is never paired)",
-            variable=self.cover_var,
-            font=("Roboto", 11),
-        ).pack(anchor="w", padx=22, pady=(6, 0))
+
 
         # ----------------------------------------------------------------
         # Start slider
@@ -907,7 +892,6 @@ class PDFItem(ctk.CTkFrame):
             "end":          int(self.slider_end.get()),
             "exclude":      self._parse_exclusions(),
             "keep_single":  self._parse_keep_single(),
-            "cover_alone":  self.cover_var.get(),
         }
 
     def get_state(self) -> dict:
@@ -918,7 +902,6 @@ class PDFItem(ctk.CTkFrame):
             "slider_e":        self.slider_end.get(),
             "exclusions":      self.exclusions,
             "keep_single_str": self.keep_single_str,
-            "cover_alone":     self.cover_var.get(),
         }
 
     def restore_state(self, state: dict) -> None:
@@ -927,7 +910,6 @@ class PDFItem(ctk.CTkFrame):
         self.keep_single_str = state.get("keep_single_str", "")
         self.slider_start.set(state["slider_s"])
         self.slider_end.set(state["slider_e"])
-        self.cover_var.set(state["cover_alone"])
         self._update_labels()
         self.btn_exclude.configure(
             fg_color="#F39C12" if self.exclusions.strip() else "#5D6D7E"
@@ -1089,7 +1071,7 @@ class PDFPageMergerGUI(ctk.CTk, TkinterDnD.DnDWrapper):
         top_bar.pack(fill="x", padx=18, pady=(12, 0))
 
         ctk.CTkLabel(
-            top_bar, text="PDF Page Merger",
+            top_bar, text="📚 PDF Page Merger",
             font=("Roboto", 22, "bold"),
         ).pack(side="left")
 
