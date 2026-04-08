@@ -7,8 +7,6 @@ Responsibilities:
   - Handle cover-alone, pre/post-range pages, and per-page exclusions
   - Save output with the selected compression preset
   - Collect errors per file so the GUI can continue the batch
-
-No `break` statements are used anywhere in this module.
 """
 
 import fitz  # PyMuPDF

@@ -15,8 +15,6 @@ Features implemented here:
   - Error log dialog for partial failures
   - Open-folder shortcut in the success dialog
   - Light / Dark theme toggle (solid button, no emoji)
-
-No `break` statements are used anywhere in this module.
 """
 
 import customtkinter as ctk
@@ -60,9 +58,6 @@ def _parse_drop_paths(data: str) -> list:
       - Paths without spaces : /home/user/file.pdf
       - Paths with spaces     : {/home/user/my file.pdf}
       - Mixed multiple paths  : /a.pdf {/b c.pdf} /d.pdf
-
-    No `break` statements are used; the loop exits by setting `current`
-    to an empty string to signal exhaustion.
     """
     paths: list = []
     current = data.strip()
@@ -164,7 +159,7 @@ def _parse_page_range_string(raw: str) -> set:
     single page number (1-based) or a closed range "a-b" (inclusive).
     Example: "1, 3-5, 10"  ->  {0, 2, 3, 4, 9}
 
-    Malformed tokens are silently ignored.  No `break` is used.
+    Malformed tokens are silently ignored.
     """
     result: set = set()
     for token in re.split(r"[,\s]+", raw.strip()):
@@ -258,7 +253,6 @@ class PreviewDialog(ctk.CTkToplevel):
     - Pages are rendered at _RENDER_SCALE then PIL-scaled to fit the
       available label area so the preview adapts to any window size,
       including live resize.
-    - No `break` statements are used.
     """
 
     # Render pages at 1.5× (≈108 DPI) for good quality before downscaling.
@@ -803,7 +797,6 @@ class PDFItem(ctk.CTkFrame):
         """
         On motion, compute vertical displacement and swap with neighbour
         when the cursor crosses the midpoint of this widget's height.
-        No `break` is used; early exit is handled by an outer condition.
         """
         if self.app._drag_item is not self:
             return
@@ -855,7 +848,7 @@ class PDFItem(ctk.CTkFrame):
     def _parse_exclusions(self) -> set:
         """
         Convert the exclusion string (e.g. "1, 3-5, 10") into a set of
-        0-based page indices.  No `break` is used.
+        0-based page indices.
         """
         return _parse_page_range_string(self.exclusions)
 
