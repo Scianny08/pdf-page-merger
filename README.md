@@ -112,6 +112,19 @@ pip install -r requirements.txt
 
 ---
 
+### 4. Install tk (Linux step only)
+If you are using Linux, make sure to install the `tk` package via your terminal. If you don't see your distro here, please report it on the issues page or look up your parent distro.
+
+| Distribution | Command |
+|---|---|
+| Debian | `sudo apt install python3-tk` |
+| Fedora | `sudo dnf install python3-tkinter` |
+| Arch | `sudo pacman -S tk` |
+| OpenSUSE | `sudo zypper install python3-tk` |
+| Alpine | `apk add python3-tkinter` |
+
+---
+
 ## 🛠️ Usage
 
 ### Launch
