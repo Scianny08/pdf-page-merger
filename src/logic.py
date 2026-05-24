@@ -36,56 +36,12 @@ COMPRESS_PRESETS: dict[str, dict] = {
 
 def get_documents_path() -> Path:
     """
-    Return the user's Documents folder reliably on Windows, macOS, and Linux.
+    Return the user's home folder on Windows, macOS, and Linux.
 
-    Windows  : reads the registry Shell Folders key so OneDrive redirects
-               are honoured; falls back to ~/Documents.
-    macOS    : ~/Documents is the canonical path; falls back to ~.
-    Linux    : tries xdg-user-dir DOCUMENTS; falls back to common folder
-               names in various locales, then ~.
+    The default output directory is created as <home>/pdf-page-merger,
+    so the app no longer depends on locale-specific Documents folders.
     """
-    home = Path.home()
-    system = platform.system()
-
-    if system == "Windows":
-        try:
-            import winreg
-            key = winreg.OpenKey(
-                winreg.HKEY_CURRENT_USER,
-                r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders",
-            )
-            path, _ = winreg.QueryValueEx(key, "Personal")
-            winreg.CloseKey(key)
-            candidate = Path(path)
-            if candidate.exists():
-                return candidate
-        except Exception:
-            pass
-        return home / "Documents"
-
-    elif system == "Darwin":
-        docs = home / "Documents"
-        return docs if docs.exists() else home
-
-    else:  # Linux / BSD
-        try:
-            result = subprocess.run(
-                ["xdg-user-dir", "DOCUMENTS"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if result.returncode == 0:
-                candidate = Path(result.stdout.strip())
-                # xdg-user-dir returns $HOME when the key is not configured
-                if candidate.exists() and candidate != home:
-                    return candidate
-        except Exception:
-            pass
-        # Fallback: common locale-specific folder names
-        for folder_name in ("Documents", "Documenti", "Documentos"):
-            candidate = home / folder_name
-            if candidate.exists():
-                return candidate
-        return home
+    return Path.home()
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +72,7 @@ def elabora_documento(
         True  -> Eastern layout (right-to-left; page N+1 on visual left)
         False -> Western layout (left-to-right; page N on visual left)
     output_dir
-        Destination folder; defaults to Documents/pdf-page-merger.
+        Destination folder; defaults to ~/pdf-page-merger.
     compress_preset
         One of the COMPRESS_PRESETS keys: "None" | "Medium" | "High".
     callback_totale

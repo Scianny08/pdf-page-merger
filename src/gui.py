@@ -996,7 +996,7 @@ class PDFPageMergerGUI(ctk.CTk, TkinterDnD.DnDWrapper):
         self._drag_snapped:  bool = False   # True after first swap in a drag
         self._is_restoring:  bool = False   # guard against recursive snapshots
 
-        # Output folder (defaults to Documents/pdf-page-merger)
+        # Output folder (defaults to ~/pdf-page-merger)
         default_out = get_documents_path() / "pdf-page-merger"
         self.output_dir_var = ctk.StringVar(value=str(default_out))
 
@@ -1205,6 +1205,7 @@ class PDFPageMergerGUI(ctk.CTk, TkinterDnD.DnDWrapper):
 
     def _browse_files(self) -> None:
         paths: list[str] = []
+        native_dialog_attempted = False
 
         if platform.system() == "Linux":
             try:
@@ -1217,11 +1218,14 @@ class PDFPageMergerGUI(ctk.CTk, TkinterDnD.DnDWrapper):
                     ],
                     capture_output=True, text=True, timeout=60,
                 )
+                native_dialog_attempted = True
                 if result.returncode == 0 and result.stdout.strip():
                     paths = [
                         p for p in result.stdout.strip().split("|")
                         if p.lower().endswith(".pdf")
                     ]
+                else:
+                    return
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 pass
 
@@ -1236,15 +1240,18 @@ class PDFPageMergerGUI(ctk.CTk, TkinterDnD.DnDWrapper):
                         ],
                         capture_output=True, text=True, timeout=60,
                     )
+                    native_dialog_attempted = True
                     if result.returncode == 0 and result.stdout.strip():
                         paths = [
                             p for p in result.stdout.strip().split()
                             if p.lower().endswith(".pdf")
                         ]
+                    else:
+                        return
                 except (FileNotFoundError, subprocess.TimeoutExpired):
                     pass
 
-        if not paths:
+        if not paths and not native_dialog_attempted:
             # Forza il focus sulla finestra prima di aprire il dialog
             self.lift()
             self.focus_force()
